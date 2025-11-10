@@ -1,71 +1,92 @@
 # robot_modes.py
-# This file contains the logic for different robot operation modes.
+import time 
 
-# --- MOTOR SPEED CONTROL ---
+# --- [Previous code remains unchanged] ---
 MAX_SPEED = 70 
-# ---------------------------
-
-# --- SERVO CONTROL ---
-SERVO_STEP_DEGREE = 0.5    # How many degrees to move per frame when button is pressed
-# ---------------------
+SERVO_STEP_DEGREE = 1.0
+START_BUTTON_ID = 7 
 
 def _clamp_value(value, min_val, max_val):
-    """Clamps a value between min_val and max_val."""
     return max(min(value, max_val), min_val)
 
-def handle_manual_mode(joy_ctrl, motor_ctrl, servo_ctrl): 
+def handle_manual_mode(joy_ctrl, motor_ctrl, servo_ctrl, pump_ctrl): # pump_ctrl added
     """
-    Handles manual driving and servo turret control.
+    Handles manual driving, servo turret, and pump control.
     """
     # --- Motor Control Logic ---
     x_axis_joy, y_axis_joy = joy_ctrl.get_axes()
-    y_axis_joy = -y_axis_joy # Invert Y-axis (Up = Forward)
-    
+    y_axis_joy = -y_axis_joy 
     base_speed = y_axis_joy * MAX_SPEED
     turn_speed = x_axis_joy * MAX_SPEED
-    
-    left_speed = base_speed + turn_speed
-    right_speed = base_speed - turn_speed
-    
-    left_speed = _clamp_value(left_speed, -MAX_SPEED, MAX_SPEED)
-    right_speed = _clamp_value(right_speed, -MAX_SPEED, MAX_SPEED)
-    
+    left_speed = _clamp_value(base_speed + turn_speed, -MAX_SPEED, MAX_SPEED)
+    right_speed = _clamp_value(base_speed - turn_speed, -MAX_SPEED, MAX_SPEED)
     motor_ctrl.set_left_motor(left_speed)
     motor_ctrl.set_right_motor(right_speed)
 
     # --- Servo Control Logic ---
-    # X button: Tilt Up
-    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_X):
-        new_tilt_angle = servo_ctrl.current_tilt_angle + SERVO_STEP_DEGREE
-        servo_ctrl.set_angle(servo_ctrl.TILT_SERVO_PIN, new_tilt_angle) # [수정 사항 4]: smooth_set_angle 대신 set_angle 직접 호출
-    
-    # B button: Tilt Down
-    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_B):
-        new_tilt_angle = servo_ctrl.current_tilt_angle - SERVO_STEP_DEGREE
-        servo_ctrl.set_angle(servo_ctrl.TILT_SERVO_PIN, new_tilt_angle) # [수정 사항 4]
+    target_pan = servo_ctrl.current_pan_angle
+    target_tilt = servo_ctrl.current_tilt_angle
+    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_X): 
+        target_tilt = servo_ctrl.current_tilt_angle + SERVO_STEP_DEGREE
+    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_B): 
+        target_tilt = servo_ctrl.current_tilt_angle - SERVO_STEP_DEGREE
+    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_Y): 
+        target_pan = servo_ctrl.current_pan_angle - SERVO_STEP_DEGREE
+    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_A): 
+        target_pan = servo_ctrl.current_pan_angle + SERVO_STEP_DEGREE
+    if target_tilt != servo_ctrl.current_tilt_angle:
+        servo_ctrl.set_angle(servo_ctrl.TILT_SERVO_PIN, target_tilt)
+    if target_pan != servo_ctrl.current_pan_angle:
+        servo_ctrl.set_angle(servo_ctrl.PAN_SERVO_PIN, target_pan)
 
-    # Y button: Pan Left
-    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_Y):
-        new_pan_angle = servo_ctrl.current_pan_angle - SERVO_STEP_DEGREE
-        servo_ctrl.set_angle(servo_ctrl.PAN_SERVO_PIN, new_pan_angle) # [수정 사항 4]
-        
-    # A button: Pan Right
-    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_A):
-        new_pan_angle = servo_ctrl.current_pan_angle + SERVO_STEP_DEGREE
-        servo_ctrl.set_angle(servo_ctrl.PAN_SERVO_PIN, new_pan_angle) # [수정 사항 4]
+    # --- [NEW] Pump Control Logic ---
+    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_L):
+        pump_ctrl.pump_on()
+    else:
+        pump_ctrl.pump_off()
+    # --- [END NEW] ---
 
-    # Return a status message for printing
     return (f"[MANUAL] Motor L:{left_speed:5.0f} R:{right_speed:5.0f} | "
-            f"Servo Pan:{servo_ctrl.current_pan_angle:3d} Tilt:{servo_ctrl.current_tilt_angle:3d}")
+            f"Servo Pan:{servo_ctrl.current_pan_angle:5.1f} Tilt:{servo_ctrl.current_tilt_angle:5.1f}")
 
-def handle_automatic_mode(motor_ctrl, servo_ctrl): 
+def handle_automatic_mode(motor_ctrl, servo_ctrl, pump_ctrl): # pump_ctrl added
     """
     Handles autonomous behavior. (Placeholder)
-    This is where camera.py logic will be integrated.
     """
     motor_ctrl.stop_all() 
+    # AI logic will call pump_ctrl.pump_on() when fire is confirmed
+    # pump_ctrl.pump_off() 
     
-    # AI logic would go here, e.g., tracking a target
-    # servo_ctrl.set_angle(...)
-
     return "[AUTO] Automatic mode active... (Motors stopped)"
+
+def run_robot_loop(motor_ctrl, joy_ctrl, servo_ctrl, pump_ctrl): # pump_ctrl added
+    """
+    Runs the main robot operation loop.
+    """
+    manual_mode = False 
+    start_button_pressed_last_frame = False
+    
+    print(f"Max motor speed set to {MAX_SPEED}%.")
+    print("Press 'Start' button to toggle Manual/Automatic mode.")
+    print("Press 'L' button to activate pump (Manual).")
+    print("Press Ctrl+C to stop.")
+
+    while True:
+        # Check for mode switch
+        current_start_button_state = joy_ctrl.get_button_state(START_BUTTON_ID)
+        if current_start_button_state and not start_button_pressed_last_frame:
+            manual_mode = not manual_mode
+            print(f"\n*** MODE SWITCHED: {'MANUAL' if manual_mode else 'AUTOMATIC'} ***")
+            motor_ctrl.stop_all() 
+            pump_ctrl.pump_off() # Stop pump on mode switch
+        start_button_pressed_last_frame = current_start_button_state
+
+        # Execute logic based on mode
+        status_message = ""
+        if manual_mode:
+            status_message = handle_manual_mode(joy_ctrl, motor_ctrl, servo_ctrl, pump_ctrl)
+        else:
+            status_message = handle_automatic_mode(motor_ctrl, servo_ctrl, pump_ctrl)
+
+        print(status_message, end='\r')
+        time.sleep(0.005)
