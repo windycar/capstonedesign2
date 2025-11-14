@@ -4,7 +4,7 @@ import time
 import numpy as np 
 
 class ServoController:
-    # --- [NEW PIN MAP] ---
+    # --- [PIN MAP] ---
     PAN_SERVO_PIN = 12
     TILT_SERVO_PIN = 19
     # ---------------------
@@ -32,8 +32,28 @@ class ServoController:
         
         print(f"ServoController initialized (using RPi.GPIO pins {self.PAN_SERVO_PIN}, {self.TILT_SERVO_PIN}).")
         
-        self.set_angle(self.PAN_SERVO_PIN, self.INITIAL_PAN_ANGLE)
-        self.set_angle(self.TILT_SERVO_PIN, self.INITIAL_TILT_ANGLE)
+        # --- [FIX] ---
+        # Send a longer, continuous pulse *only* during initialization
+        # to ensure servos move to the starting position.
+        
+        print("Moving servos to initial position...")
+        
+        # Move Pan servo
+        pan_duty = self._angle_to_duty_cycle(self.INITIAL_PAN_ANGLE)
+        self.pan_pwm.ChangeDutyCycle(pan_duty)
+        
+        # Move Tilt servo
+        tilt_duty = self._angle_to_duty_cycle(self.INITIAL_TILT_ANGLE)
+        self.tilt_pwm.ChangeDutyCycle(tilt_duty)
+        
+        # Wait 0.5 seconds for servos to physically move
+        time.sleep(0.5)
+        
+        # Turn off pulses (back to one-shot mode)
+        self.pan_pwm.ChangeDutyCycle(0)
+        self.tilt_pwm.ChangeDutyCycle(0)
+        # --- [END FIX] ---
+        
         print(f"Servos initialized: Pan to {self.INITIAL_PAN_ANGLE} deg, Tilt to {self.INITIAL_TILT_ANGLE} deg.")
 
     def _angle_to_duty_cycle(self, angle):
@@ -64,4 +84,4 @@ class ServoController:
         print("Cleaning up Servos (RPi.GPIO)...")
         self.pan_pwm.stop()
         self.tilt_pwm.stop()
-        # GPIO.cleanup() will be called by motor_ctrl in main.py
+        # GPIO.cleanup() will be called by motor_ctrl in main.pys
