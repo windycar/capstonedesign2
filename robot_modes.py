@@ -2,7 +2,7 @@
 import time 
 
 # --- [Previous code remains unchanged] ---
-MAX_SPEED = 70 
+MAX_SPEED = 30
 SERVO_STEP_DEGREE = 1.0
 START_BUTTON_ID = 7 
 
