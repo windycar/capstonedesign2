@@ -1,244 +1,245 @@
 # robot_modes.py
-import time 
+import time
+import math
 
-# --- Constants ---
-MAX_SPEED = 70 
-SERVO_STEP_DEGREE = 1.0 # For manual control (not directly used in auto aiming)
-START_BUTTON_ID = 7 
+class RobotState:
+    def __init__(self):
+        self.current_mode = "automatic" # "automatic", "manual"
+        self.fire_detected_ai = False
+        self.fire_detected_sensor = False
+        self.gas_detected_sensor = False
+        self.water_level = 100
+        self.pump_is_on = False
+        # Add other states as needed
 
-# --- Global State (for sharing between functions/threads) ---
-g_fire_detected_ai = False
-g_fire_detected_sensor = False
-g_gas_detected = False
-g_water_level = 100
-g_pump_is_on = False # Keep track of pump state globally
+class RobotController:
+    def __init__(self, motor_ctrl, servo_ctrl, pump_ctrl, buzzer_ctrl, rgb_led,
+                 water_sensor, gas_sensor, fire_sensor, joystick_ctrl, gui_updater,
+                 camera_ctrl, detector_ctrl, args):
+        self.motor_ctrl = motor_ctrl
+        self.servo_ctrl = servo_ctrl
+        self.pump_ctrl = pump_ctrl
+        self.buzzer_ctrl = buzzer_ctrl
+        self.rgb_led = rgb_led
+        self.water_sensor = water_sensor
+        self.gas_sensor = gas_sensor
+        self.fire_sensor = fire_sensor
+        self.joystick_ctrl = joystick_ctrl
+        self.gui_updater = gui_updater
+        self.camera_ctrl = camera_ctrl # Can be None
+        self.detector_ctrl = detector_ctrl # Can be None
+        self.args = args
 
-# --- Auto Aiming Parameters ---
-AIMING_TOLERANCE_X = 20 # Pixels: how close to center x-axis is "aimed"
-AIMING_SPEED_PAN = 0.5 # Degrees per step for pan adjustment
-AIMING_SPEED_TILT = 0.5 # Degrees per step for tilt adjustment
+        self.robot_state = RobotState()
+        self.running = True # Flag to control the loop
 
-# --- Helper Functions ---
-def _clamp_value(value, min_val, max_val):
-    return max(min(value, max_val), min_val)
+        self.last_sensor_read_time = time.time()
+        self.sensor_read_interval = 0.5 # Read sensors twice per second
 
-def handle_manual_mode(joy_ctrl, motor_ctrl, servo_ctrl, pump_ctrl): 
-    """
-    Handles manual driving, servo turret, and pump control.
-    Returns: status_message (str), pump_is_on (bool)
-    """
-    global g_pump_is_on # Update global pump state
+        self.target_pan = 90
+        self.target_tilt = 90
+        self.pan_speed = 5
+        self.tilt_speed = 5
 
-    # --- Motor Control ---
-    x_axis_joy, y_axis_joy = joy_ctrl.get_axes()
-    y_axis_joy = -y_axis_joy 
-    base_speed = y_axis_joy * MAX_SPEED
-    turn_speed = x_axis_joy * MAX_SPEED
-    left_speed = _clamp_value(base_speed + turn_speed, -MAX_SPEED, MAX_SPEED)
-    right_speed = _clamp_value(base_speed - turn_speed, -MAX_SPEED, MAX_SPEED)
-    motor_ctrl.set_left_motor(left_speed)
-    motor_ctrl.set_right_motor(right_speed)
+        self.patrol_state = 0 # 0: Moving forward, 1: Turning
+        self.patrol_turn_start_time = 0
+        self.patrol_turn_duration = 1.0 # Duration to turn (seconds)
+        self.patrol_move_duration = 3.0 # Duration to move forward (seconds)
+        self.last_patrol_action_time = time.time()
 
-    # --- Servo Control ---
-    target_pan = servo_ctrl.current_pan_angle
-    target_tilt = servo_ctrl.current_tilt_angle
-    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_X): 
-        target_tilt += SERVO_STEP_DEGREE
-    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_B): 
-        target_tilt -= SERVO_STEP_DEGREE
-    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_Y): 
-        target_pan -= SERVO_STEP_DEGREE
-    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_A): 
-        target_pan += SERVO_STEP_DEGREE
-    
-    # Apply angle limits and update servo
-    servo_ctrl.set_angle(servo_ctrl.TILT_SERVO_PIN, target_tilt)
-    servo_ctrl.set_angle(servo_ctrl.PAN_SERVO_PIN, target_pan)
+        self.fire_extinguish_state = 0 # 0: find, 1: approach, 2: extinguish
+        self.last_fire_action_time = time.time()
 
-    # --- Pump Control (L Button) ---
-    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_L):
-        pump_ctrl.pump_on()
-        g_pump_is_on = True
-    else:
-        pump_ctrl.pump_off()
-        g_pump_is_on = False
+    def stop_all_movement(self):
+        self.motor_ctrl.stop()
+        self.pump_ctrl.stop()
+        self.rgb_led.set_color(0, 0, 0) # Turn off LEDs
+        self.buzzer_ctrl.off()
 
-    status_message = (f"[MANUAL] Motor L:{left_speed:5.0f} R:{right_speed:5.0f} | "
-                      f"Servo Pan:{servo_ctrl.current_pan_angle:5.1f} Tilt:{servo_ctrl.current_tilt_angle:5.1f}")
-    
-    return status_message
+    def read_sensors(self):
+        self.robot_state.water_level = self.water_sensor.get_water_level()
+        self.robot_state.gas_detected_sensor = self.gas_sensor.is_gas_detected()
+        self.robot_state.fire_detected_sensor = self.fire_sensor.is_fire_detected()
 
-def handle_automatic_mode(motor_ctrl, servo_ctrl, pump_ctrl, camera, detector, fire_sensor): 
-    """
-    Handles autonomous behavior including AI-based aiming and pump control.
-    Returns: status_message (str)
-    """
-    global g_fire_detected_ai, g_fire_detected_sensor, g_pump_is_on
-    
-    motor_ctrl.stop_all() # For now, robot remains stationary in auto mode
-    
-    frame = camera.read()
-    if frame is None:
-        g_fire_detected_ai = False
-        pump_ctrl.pump_off()
-        g_pump_is_on = False
-        return "[AUTO] Camera Frame Unavailable."
+        # For demonstration: if water level is 0, pump is off
+        if self.robot_state.water_level == 0:
+            self.pump_ctrl.stop()
+            self.robot_state.pump_is_on = False
 
-    h_frame, w_frame, _ = frame.shape
-    center_x_frame = w_frame / 2
-    center_y_frame = h_frame / 2
-
-    # --- AI Inference ---
-    boxes, confs, cids, _ = detector.infer(frame)
-    
-    # Assume the detector.draw_detections function now updates g_fire_detected_ai
-    # and draws boxes directly on the frame (not returning a modified frame here)
-    detector.draw_detections(frame, boxes, confs, cids) # This modifies the frame for GUI
-    g_fire_detected_ai = (len(boxes) > 0) # Update global AI detection status
-
-    status_message = "[AUTO] Patrolling..."
-    
-    if g_fire_detected_ai:
-        # --- AI Aiming Logic ---
-        # Find the largest/most confident fire (for now, just take the first detected)
-        # In a more advanced system, you might track the fire or select closest.
-        fire_box = boxes[0] 
-        fire_x_center = (fire_box[0] + fire_box[2]) / 2
-        fire_y_center = (fire_box[1] + fire_box[3]) / 2
-
-        # Calculate deviation from frame center
-        deviation_x = fire_x_center - center_x_frame
-        deviation_y = fire_y_center - center_y_frame
-
-        # Adjust Pan Servo
-        current_pan = servo_ctrl.current_pan_angle
-        if abs(deviation_x) > AIMING_TOLERANCE_X:
-            if deviation_x > 0: # Fire is to the right of center
-                servo_ctrl.set_angle(servo_ctrl.PAN_SERVO_PIN, current_pan + AIMING_SPEED_PAN)
-            else: # Fire is to the left of center
-                servo_ctrl.set_angle(servo_ctrl.PAN_SERVO_PIN, current_pan - AIMING_SPEED_PAN)
+        # Simulate AI fire detection for GUI if detector is not available
+        if not self.detector_ctrl:
+            # If no AI, AI fire status mirrors flame sensor for GUI demo
+            self.robot_state.fire_detected_ai = self.robot_state.fire_detected_sensor
         
-        # Adjust Tilt Servo (implement if needed, for simplicity focusing on Pan for now)
-        # current_tilt = servo_ctrl.current_tilt_angle
-        # if abs(deviation_y) > AIMING_TOLERANCE_Y:
-        #     if deviation_y > 0: # Fire is below center
-        #         servo_ctrl.set_angle(servo_ctrl.TILT_SERVO_PIN, current_tilt - AIMING_SPEED_TILT)
-        #     else: # Fire is above center
-        #         servo_ctrl.set_angle(servo_ctrl.TILT_SERVO_PIN, current_tilt + AIMING_SPEED_TILT)
-
-        status_message = f"[AUTO] Fire Detected! Aiming... Pan:{servo_ctrl.current_pan_angle:.1f}"
-
-        # --- Pump Control (after aiming check) ---
-        # Only activate pump if fire is reasonably centered AND flame sensor confirms
-        if abs(deviation_x) <= AIMING_TOLERANCE_X: # Assuming centered on X-axis is enough for pump
-            _, g_fire_detected_sensor = fire_sensor.read_value() # Read digital flame sensor
-            if g_fire_detected_sensor:
-                pump_ctrl.pump_on()
-                g_pump_is_on = True
-                status_message += " - PUMP ON!"
-            else:
-                pump_ctrl.pump_off()
-                g_pump_is_on = False
-                status_message += " - Sensor not confirmed."
-        else:
-            pump_ctrl.pump_off() # Not aimed yet, or not confirmed
-            g_pump_is_on = False
-
-    else:
-        # No AI fire detection
-        pump_ctrl.pump_off()
-        g_pump_is_on = False
-        servo_ctrl.set_angle(servo_ctrl.PAN_SERVO_PIN, servo_ctrl.CENTER_PAN_ANGLE) # Return to center
-        servo_ctrl.set_angle(servo_ctrl.TILT_SERVO_PIN, servo_ctrl.CENTER_TILT_ANGLE) # Return to center
-
-    return status_message
-
-
-def run_robot_loop(app_gui, motor_ctrl, joy_ctrl, servo_ctrl, pump_ctrl, 
-                   camera, detector, fire_sensor, gas_sensor, water_sensor, buzzer, rgb_led): 
-    """
-    Runs the main robot operation loop.
-    This function runs in a separate thread from the GUI.
-    """
-    global g_fire_detected_ai, g_fire_detected_sensor, g_gas_detected, g_water_level, g_pump_is_on
-    
-    manual_mode = False 
-    start_button_pressed_last_frame = False
-    
-    print("[INFO] Robot control loop started.")
-    print(f"Max motor speed set to {MAX_SPEED}%.")
-    print("Press 'Start' button to toggle Manual/Automatic mode.")
-    print("Press 'L' button to activate pump (Manual).")
-    print("Press Ctrl+C to stop.")
-
-    while app_gui.running: # Use GUI's running flag to control the loop
+    def handle_manual_mode(self):
+        self.robot_state.current_mode = "manual"
+        # Joystick control for motors
+        left_axis = self.joystick_ctrl.get_axis(1) # Left stick Y-axis (vertical)
+        right_axis = self.joystick_ctrl.get_axis(4) # Right stick Y-axis (vertical)
         
-        # --- 1. Read All Global Sensors ---
-        # water_level = water_sensor.read_level()
-        # g_fire_detected_sensor = fire_sensor.read_value()[1] # Assuming digital read
-        # g_gas_detected = gas_sensor.read_value()[1] # Assuming digital read
+        # Assuming Y-axis is inverted for forward/backward movement
+        left_power = -left_axis * 100 
+        right_power = -right_axis * 100
 
-        # Placeholder for actual sensor reads (replace with your sensor objects)
-        g_water_level = water_sensor.read_level()
-        _, g_fire_detected_sensor = fire_sensor.read_value() # Returns (value, is_detected)
-        _, g_gas_detected = gas_sensor.read_value() # Returns (value, is_detected)
+        # Small dead zone
+        dead_zone = 5
+        if abs(left_power) < dead_zone: left_power = 0
+        if abs(right_power) < dead_zone: right_power = 0
+
+        self.motor_ctrl.set_left_motor(left_power)
+        self.motor_ctrl.set_right_motor(right_power)
+
+        # Joystick control for servo
+        pan_axis = self.joystick_ctrl.get_axis(0) # Left stick X-axis
+        tilt_axis = self.joystick_ctrl.get_axis(3) # Right stick X-axis
         
-        # --- 2. Check for Mode Switch ---
-        current_start_button_state = joy_ctrl.get_button_state(START_BUTTON_ID)
-        if current_start_button_state and not start_button_pressed_last_frame:
-            manual_mode = not manual_mode
-            print(f"\n*** MODE SWITCHED: {'MANUAL' if manual_mode else 'AUTOMATIC'} ***")
-            motor_ctrl.stop_all() 
-            pump_ctrl.pump_off() 
-            g_pump_is_on = False # Reset pump state
-            if manual_mode:
-                camera.stop() # Turn camera OFF in manual mode
-            else:
-                camera.start() # Turn camera ON in auto mode for AI detection
+        # Adjust target_pan/tilt based on joystick input
+        if abs(pan_axis) > 0.1:
+            self.target_pan += pan_axis * self.pan_speed
+        if abs(tilt_axis) > 0.1:
+            self.target_tilt -= tilt_axis * self.tilt_speed # Invert for intuitive control
+        
+        self.target_pan = max(0, min(180, self.target_pan))
+        self.target_tilt = max(0, min(180, self.target_tilt))
+        self.servo_ctrl.set_pan_angle(self.target_pan)
+        self.servo_ctrl.set_tilt_angle(self.target_tilt)
+
+        # Joystick control for pump (Button A - index 0, Button B - index 1)
+        if self.joystick_ctrl.get_button(0): # A button
+            if not self.robot_state.pump_is_on and self.robot_state.water_level > 0:
+                self.pump_ctrl.start()
+                self.rgb_led.set_color(0, 0, 255) # Blue for pump on
+                self.robot_state.pump_is_on = True
+        elif self.joystick_ctrl.get_button(1): # B button
+            if self.robot_state.pump_is_on:
+                self.pump_ctrl.stop()
+                self.rgb_led.set_color(0, 0, 0)
+                self.robot_state.pump_is_on = False
+        
+        # Update AI fire status from detector if available (for manual mode display)
+        if self.camera_ctrl and self.detector_ctrl:
+            frame = self.camera_ctrl.read()
+            if frame is not None:
+                boxes, confs, cids, _ = self.detector_ctrl.infer(frame)
+                self.robot_state.fire_detected_ai = any(cid == 0 for cid in cids) # Assuming class 0 is fire
+
+        self.rgb_led.set_color(0, 0, 0) # Manual mode default LED off
+
+    def handle_automatic_mode(self):
+        self.robot_state.current_mode = "automatic"
+        self.rgb_led.set_color(0, 255, 0) # Green for automatic mode
+
+        # Always stop pump in auto mode if no fire detected
+        if not self.robot_state.fire_detected_ai and not self.robot_state.fire_detected_sensor and self.robot_state.pump_is_on:
+            self.pump_ctrl.stop()
+            self.robot_state.pump_is_on = False
+
+        if self.robot_state.gas_detected_sensor:
+            print("Gas detected! Stopping and sounding alarm.")
+            self.stop_all_movement()
+            self.buzzer_ctrl.on()
+            self.rgb_led.set_color(255, 0, 0) # Red for gas
+            return
+
+        if self.robot_state.fire_detected_ai or self.robot_state.fire_detected_sensor:
+            if self.robot_state.water_level == 0:
+                print("Fire detected but no water! Sounding alarm and stopping.")
+                self.stop_all_movement()
+                self.buzzer_ctrl.on()
+                self.rgb_led.set_color(255, 0, 0) # Red for no water
+                return
             
-            # Reset servo to center on mode switch
-            servo_ctrl.set_angle(servo_ctrl.PAN_SERVO_PIN, servo_ctrl.CENTER_PAN_ANGLE)
-            servo_ctrl.set_angle(servo_ctrl.TILT_SERVO_PIN, servo_ctrl.CENTER_TILT_ANGLE)
-
-        start_button_pressed_last_frame = current_start_button_state
-
-        # --- 3. Execute Mode-Specific Logic ---
-        status_message = ""
-        if manual_mode:
-            status_message = handle_manual_mode(joy_ctrl, motor_ctrl, servo_ctrl, pump_ctrl)
-        else:
-            status_message = handle_automatic_mode(motor_ctrl, servo_ctrl, pump_ctrl, camera, detector, fire_sensor)
-
-        # --- 4. Handle Special Situations (Overrides for Buzzer/LED) ---
-        if g_gas_detected:
-            # Priority 1: Gas Detected (Highest)
-            rgb_led.set_siren_effect() # 소방차 라이트
-            buzzer.buzz_on()           # 삐이이이이 (연속)
-        elif g_pump_is_on:
-            # Priority 2: Pump is On (Water spraying)
-            buzzer.beep_biyong()       # 삐용삐용
-            if manual_mode:
-                rgb_led.set_manual_mode() # 파란색 (물 쏠 때도 모드 색상 유지)
-            else:
-                rgb_led.set_auto_mode()   # 초록색 (물 쏠 때도 모드 색상 유지)
-        else:
-            # Priority 3: Normal Mode (No gas, no pump)
-            buzzer.buzz_off()          # 부저 끄기
-            if manual_mode:
-                rgb_led.set_manual_mode() # 파란색
-            else:
-                rgb_led.set_auto_mode()   # 초록색
+            # Fire extinguishing logic
+            print("Fire detected! Initiating extinguishing sequence.")
+            self.extinguish_fire_sequence()
+            self.rgb_led.set_color(255, 165, 0) # Orange for fire fighting
+            self.buzzer_ctrl.off() # Turn off buzzer if actively fighting fire
+            return
         
-        # --- 5. Update GUI (Thread-safe) ---
-        sensor_data = {
-            'water': g_water_level,
-            'flame': g_fire_detected_sensor,
-            'gas': g_gas_detected,
-            'pump_on': g_pump_is_on # Pass pump state to GUI for display if needed
-        }
-        app_gui.update_robot_state(manual_mode, sensor_data, g_fire_detected_ai)
-        
-        print(status_message, end='\r')
-        time.sleep(0.005) # Maintain fast loop for joystick/motor control
+        # If no gas and no fire, patrol
+        self.buzzer_ctrl.off()
+        self.patrol_mode()
+        self.rgb_led.set_color(0, 255, 0) # Green for patrolling
+
+    def extinguish_fire_sequence(self):
+        # This is a placeholder for a more complex fire fighting logic
+        # For now, it will just turn on the pump and stop movement
+        self.motor_ctrl.stop()
+        if not self.robot_state.pump_is_on and self.robot_state.water_level > 0:
+            self.pump_ctrl.start()
+            self.robot_state.pump_is_on = True
+
+        # In a real scenario, you would use AI to aim the servo here
+        # For now, just set to a default angle (e.g., straight ahead)
+        self.servo_ctrl.set_pan_angle(90)
+        self.servo_ctrl.set_tilt_angle(90)
+
+    def patrol_mode(self):
+        current_time = time.time()
+
+        if self.patrol_state == 0: # Move forward
+            self.motor_ctrl.set_left_motor(50)
+            self.motor_ctrl.set_right_motor(50)
+            if current_time - self.last_patrol_action_time > self.patrol_move_duration:
+                self.patrol_state = 1
+                self.patrol_turn_start_time = current_time
+        elif self.patrol_state == 1: # Turn
+            self.motor_ctrl.set_left_motor(50) # Turn right (left wheel forward, right wheel backward for pivot)
+            self.motor_ctrl.set_right_motor(-50)
+            if current_time - self.patrol_turn_start_time > self.patrol_turn_duration:
+                self.patrol_state = 0
+                self.last_patrol_action_time = current_time
+
+    def set_running(self, status):
+        self.running = status
+
+def robot_loop(motor_ctrl, servo_ctrl, pump_ctrl, buzzer_ctrl, rgb_led, 
+               water_sensor, gas_sensor, fire_sensor, joystick_ctrl, gui_updater,
+               camera_ctrl, detector_ctrl, args):
     
+    robot = RobotController(motor_ctrl, servo_ctrl, pump_ctrl, buzzer_ctrl, rgb_led, 
+                            water_sensor, gas_sensor, fire_sensor, joystick_ctrl, gui_updater,
+                            camera_ctrl, detector_ctrl, args)
+
+    last_gui_update_time = time.time()
+    gui_update_interval = 0.1 # Update GUI 10 times per second
+
+    print("[INFO] Robot control loop started.")
+    while robot.running:
+        current_time = time.time()
+
+        # Update joystick state
+        if joystick_ctrl:
+            joystick_ctrl.update()
+
+        # Read sensors at a fixed interval
+        if current_time - robot.last_sensor_read_time >= robot.sensor_read_interval:
+            robot.read_sensors()
+            robot.last_sensor_read_time = current_time
+
+        # Mode switching logic
+        if joystick_ctrl and joystick_ctrl.get_button(7): # START button (index 7 for Xbox)
+            robot.robot_state.current_mode = "automatic"
+        elif joystick_ctrl and joystick_ctrl.get_button(6): # BACK button (index 6 for Xbox)
+            robot.robot_state.current_mode = "manual"
+        
+        if robot.robot_state.current_mode == "manual":
+            robot.handle_manual_mode()
+        else:
+            robot.handle_automatic_mode()
+
+        # Update GUI (thread-safe)
+        if current_time - last_gui_update_time >= gui_update_interval:
+            gui_updater(robot.robot_state.current_mode == "manual", 
+                        {
+                            'water': robot.robot_state.water_level,
+                            'flame': robot.robot_state.fire_detected_sensor,
+                            'gas': robot.robot_state.gas_detected_sensor,
+                            'pump_on': robot.robot_state.pump_is_on
+                        },
+                        robot.robot_state.fire_detected_ai)
+            last_gui_update_time = current_time
+
+        time.sleep(0.05) # Small delay to prevent busy-waiting
+
     print("[INFO] Robot control loop stopped.")
