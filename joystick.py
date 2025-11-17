@@ -5,14 +5,17 @@ import time
 class JoystickController:
     DEADZONE = 0.1 # Joystick sensitivity deadzone
 
-    # 8BitDo Controller Button IDs (Verify these!)
-    # These IDs can vary based on connection mode (X-input/D-input).
-    # You MUST verify these IDs using a button test script.
-    BUTTON_A = 0 # 'A' button
-    BUTTON_B = 1 # 'B' button
-    BUTTON_X = 3 # 'X' button
-    BUTTON_Y = 4 # 'Y' button
-    START_BUTTON = 7 # 'Start' button
+    # --- [NEW BUTTON MAP] ---
+    # Based on your provided signal info
+    BUTTON_B = 0
+    BUTTON_A = 1
+    BUTTON_Y = 2
+    BUTTON_X = 3
+    BUTTON_L = 4
+    BUTTON_R = 5
+    BUTTON_SELECT = 6
+    START_BUTTON = 7 
+    # ------------------------
     
     def __init__(self):
         """Initialize Pygame and the joystick"""
@@ -34,11 +37,7 @@ class JoystickController:
         print(f"Axes: {self.num_axes}, Buttons: {self.num_buttons}")
 
     def get_axes(self):
-        """
-        Get the X (Axis 0) and Y (Axis 1) values.
-        Returns: (x_val, y_val), each between -1.0 and 1.0
-        """
-        pygame.event.pump() # Process event queue
+        pygame.event.pump() 
         
         x_val = self.joystick.get_axis(0) if self.num_axes > 0 else 0.0
         y_val = self.joystick.get_axis(1) if self.num_axes > 1 else 0.0
@@ -51,10 +50,6 @@ class JoystickController:
         return x_val, y_val
 
     def get_button_state(self, button_id):
-        """
-        Get the state of a specific button.
-        Returns: True (Pressed) or False (Not Pressed)
-        """
         pygame.event.pump() 
         
         if button_id >= self.num_buttons:

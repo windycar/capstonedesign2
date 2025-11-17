@@ -14,17 +14,16 @@ class MotorController:
 
     def __init__(self, pwm_freq=1000):
         """Initialize motor controller and setup GPIO pins"""
-        # Using RPi.GPIO for motors as pigpio is for servos
+        # Set GPIO mode ONCE here for all RPi.GPIO modules
         GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False) # Disable warnings
         
         GPIO.setup(self.STBY, GPIO.OUT)
         
-        # Setup Motor A (Left) pins
         GPIO.setup(self.AIN1, GPIO.OUT)
         GPIO.setup(self.AIN2_PIN, GPIO.OUT)
         GPIO.setup(self.PWMA, GPIO.OUT)
         
-        # Setup Motor B (Right) pins
         GPIO.setup(self.BIN1, GPIO.OUT)
         GPIO.setup(self.BIN2_PIN, GPIO.OUT)
         GPIO.setup(self.PWMB, GPIO.OUT)
@@ -39,12 +38,7 @@ class MotorController:
         print("MotorController initialized (using RPi.GPIO).")
 
     def set_left_motor(self, speed):
-        """
-        Controls the speed and direction of the left motor (A).
-        speed: -100 (Reverse) to 100 (Forward)
-        """
         speed = max(min(speed, 100), -100) 
-
         if speed > 0:
             GPIO.output(self.AIN1, GPIO.HIGH)
             GPIO.output(self.AIN2_PIN, GPIO.LOW)
@@ -59,12 +53,7 @@ class MotorController:
             self.p_a.ChangeDutyCycle(0)
 
     def set_right_motor(self, speed):
-        """
-        Controls the speed and direction of the right motor (B).
-        speed: -100 (Reverse) to 100 (Forward)
-        """
         speed = max(min(speed, 100), -100)
-
         if speed > 0:
             GPIO.output(self.BIN1, GPIO.HIGH)
             GPIO.output(self.BIN2_PIN, GPIO.LOW)
@@ -84,10 +73,12 @@ class MotorController:
         self.set_right_motor(0)
 
     def cleanup(self):
-        """Cleans up GPIO resources."""
-        print("Cleaning up GPIO...")
+        """Cleans up ALL RPi.GPIO resources."""
+        print("Cleaning up ALL RPi.GPIO...")
         self.stop_all()
         GPIO.output(self.STBY, GPIO.LOW) # Disable driver
         self.p_a.stop()
         self.p_b.stop()
+        
+        # This will clean up motor AND servo pins
         GPIO.cleanup()

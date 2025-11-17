@@ -1,71 +1,135 @@
 # robot_modes.py
-# This file contains the logic for different robot operation modes.
+import time 
 
-# --- MOTOR SPEED CONTROL ---
+# --- Constants ---
 MAX_SPEED = 70 
-# ---------------------------
-
-# --- SERVO CONTROL ---
-SERVO_STEP_DEGREE = 0.5    # How many degrees to move per frame when button is pressed
-# ---------------------
+SERVO_STEP_DEGREE = 1.0
+START_BUTTON_ID = 7 
 
 def _clamp_value(value, min_val, max_val):
-    """Clamps a value between min_val and max_val."""
     return max(min(value, max_val), min_val)
 
-def handle_manual_mode(joy_ctrl, motor_ctrl, servo_ctrl): 
+def handle_manual_mode(joy_ctrl, motor_ctrl, servo_ctrl, pump_ctrl): 
     """
     Handles manual driving and servo turret control.
+    Returns: status_message (str), pump_is_on (bool)
     """
-    # --- Motor Control Logic ---
+    # --- Motor Control ---
     x_axis_joy, y_axis_joy = joy_ctrl.get_axes()
-    y_axis_joy = -y_axis_joy # Invert Y-axis (Up = Forward)
-    
+    y_axis_joy = -y_axis_joy 
     base_speed = y_axis_joy * MAX_SPEED
     turn_speed = x_axis_joy * MAX_SPEED
-    
-    left_speed = base_speed + turn_speed
-    right_speed = base_speed - turn_speed
-    
-    left_speed = _clamp_value(left_speed, -MAX_SPEED, MAX_SPEED)
-    right_speed = _clamp_value(right_speed, -MAX_SPEED, MAX_SPEED)
-    
+    left_speed = _clamp_value(base_speed + turn_speed, -MAX_SPEED, MAX_SPEED)
+    right_speed = _clamp_value(base_speed - turn_speed, -MAX_SPEED, MAX_SPEED)
     motor_ctrl.set_left_motor(left_speed)
     motor_ctrl.set_right_motor(right_speed)
 
-    # --- Servo Control Logic ---
-    # X button: Tilt Up
-    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_X):
-        new_tilt_angle = servo_ctrl.current_tilt_angle + SERVO_STEP_DEGREE
-        servo_ctrl.set_angle(servo_ctrl.TILT_SERVO_PIN, new_tilt_angle) # [수정 사항 4]: smooth_set_angle 대신 set_angle 직접 호출
+    # --- Servo Control ---
+    target_pan = servo_ctrl.current_pan_angle
+    target_tilt = servo_ctrl.current_tilt_angle
+    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_X): 
+        target_tilt = servo_ctrl.current_tilt_angle + SERVO_STEP_DEGREE
+    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_B): 
+        target_tilt = servo_ctrl.current_tilt_angle - SERVO_STEP_DEGREE
+    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_Y): 
+        target_pan = servo_ctrl.current_pan_angle - SERVO_STEP_DEGREE
+    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_A): 
+        target_pan = servo_ctrl.current_pan_angle + SERVO_STEP_DEGREE
+    if target_tilt != servo_ctrl.current_tilt_angle:
+        servo_ctrl.set_angle(servo_ctrl.TILT_SERVO_PIN, target_tilt)
+    if target_pan != servo_ctrl.current_pan_angle:
+        servo_ctrl.set_angle(servo_ctrl.PAN_SERVO_PIN, target_pan)
+
+    # --- Pump Control (L Button) ---
+    pump_is_on = False
+    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_L):
+        pump_ctrl.pump_on()
+        pump_is_on = True
+    else:
+        pump_ctrl.pump_off()
+
+    status_message = (f"[MANUAL] Motor L:{left_speed:5.0f} R:{right_speed:5.0f} | "
+                      f"Servo Pan:{servo_ctrl.current_pan_angle:5.1f} Tilt:{servo_ctrl.current_tilt_angle:5.1f}")
     
-    # B button: Tilt Down
-    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_B):
-        new_tilt_angle = servo_ctrl.current_tilt_angle - SERVO_STEP_DEGREE
-        servo_ctrl.set_angle(servo_ctrl.TILT_SERVO_PIN, new_tilt_angle) # [수정 사항 4]
+    return status_message, pump_is_on
 
-    # Y button: Pan Left
-    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_Y):
-        new_pan_angle = servo_ctrl.current_pan_angle - SERVO_STEP_DEGREE
-        servo_ctrl.set_angle(servo_ctrl.PAN_SERVO_PIN, new_pan_angle) # [수정 사항 4]
-        
-    # A button: Pan Right
-    if joy_ctrl.get_button_state(joy_ctrl.BUTTON_A):
-        new_pan_angle = servo_ctrl.current_pan_angle + SERVO_STEP_DEGREE
-        servo_ctrl.set_angle(servo_ctrl.PAN_SERVO_PIN, new_pan_angle) # [수정 사항 4]
-
-    # Return a status message for printing
-    return (f"[MANUAL] Motor L:{left_speed:5.0f} R:{right_speed:5.0f} | "
-            f"Servo Pan:{servo_ctrl.current_pan_angle:3d} Tilt:{servo_ctrl.current_tilt_angle:3d}")
-
-def handle_automatic_mode(motor_ctrl, servo_ctrl): 
+def handle_automatic_mode(motor_ctrl, servo_ctrl, pump_ctrl): 
     """
     Handles autonomous behavior. (Placeholder)
-    This is where camera.py logic will be integrated.
+    Returns: status_message (str), pump_is_on (bool)
     """
     motor_ctrl.stop_all() 
     
-    # AI logic would go here, e.g., tracking a target
-    # servo_ctrl.set_angle(...)
+    # --- [NEW] AI Logic Placeholder ---
+    # if (fire_detected_ai and fire_detected_sensor):
+    #     pump_ctrl.pump_on()
+    #     pump_is_on = True
+    # else:
+    #     pump_ctrl.pump_off()
+    #     pump_is_on = False
+    # ----------------------------------
+    pump_is_on = False # Placeholder
+    
+    return "[AUTO] Automatic mode active... (Motors stopped)", pump_is_on
 
-    return "[AUTO] Automatic mode active... (Motors stopped)"
+def run_robot_loop(motor_ctrl, joy_ctrl, servo_ctrl, pump_ctrl, 
+                   gas_sensor, water_sensor, buzzer, rgb_led): 
+    """
+    Runs the main robot operation loop.
+    (Removed other sensors for this specific request)
+    """
+    manual_mode = False 
+    start_button_pressed_last_frame = False
+    
+    print(f"Max motor speed set to {MAX_SPEED}%.")
+    print("Press 'Start' button to toggle Manual/Automatic mode.")
+    print("Press 'L' button to activate pump (Manual).")
+    print("Press Ctrl+C to stop.")
+
+    while True:
+        # --- 1. Read Global Sensors ---
+        # g_gas_detected = gas_sensor.read_value()[1] # Assuming digital read
+        g_gas_detected = False # Placeholder
+        # g_water_level = water_sensor.read_level()
+        g_water_level = 100 # Placeholder
+
+        # --- 2. Check for Mode Switch ---
+        current_start_button_state = joy_ctrl.get_button_state(START_BUTTON_ID)
+        if current_start_button_state and not start_button_pressed_last_frame:
+            manual_mode = not manual_mode
+            print(f"\n*** MODE SWITCHED: {'MANUAL' if manual_mode else 'AUTOMATIC'} ***")
+            motor_ctrl.stop_all() 
+            pump_ctrl.pump_off() 
+        start_button_pressed_last_frame = current_start_button_state
+
+        # --- 3. Execute Mode-Specific Logic ---
+        status_message = ""
+        pump_is_on = False
+        if manual_mode:
+            status_message, pump_is_on = handle_manual_mode(joy_ctrl, motor_ctrl, servo_ctrl, pump_ctrl)
+        else:
+            status_message, pump_is_on = handle_automatic_mode(motor_ctrl, servo_ctrl, pump_ctrl)
+
+        # --- 4. [NEW] Handle Special Situations (Overrides) ---
+        if g_gas_detected:
+            # Priority 1: Gas Detected
+            rgb_led.set_siren_effect() # 
+            buzzer_ctrl.buzz_on()      # 
+        elif pump_is_on:
+            # Priority 2: Pump is On
+            buzzer_ctrl.beep_biyong()  # 
+            if manual_mode:
+                rgb_led.set_manual_mode() # 
+            else:
+                rgb_led.set_auto_mode()   # 
+        else:
+            # Priority 3: Normal Mode
+            buzzer_ctrl.buzz_off()     # 
+            if manual_mode:
+                rgb_led.set_manual_mode() # 
+            else:
+                rgb_led.set_auto_mode()   # 
+        # --- [END NEW] ---
+
+        print(status_message, end='\r')
+        time.sleep(0.005)

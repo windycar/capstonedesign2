@@ -1,93 +1,135 @@
 # main.py
+import threading
+import argparse
+import RPi.GPIO as GPIO # We need this for cleanup in case of crash
 import time
+
+# Import all our modules
+import robot_modes 
 import motor
 import joystick
-import servo 
-import robot_modes
-# camera.py and speaker.py will be imported here later
+import servo
+import pump 
+import camera
+import detector
+import app_gui
+import mcp_adc
+import gas_sensor
+import water_sensor
+import fire_sensor
+import buzzer
+import rgb_led
 
-# 8BitDo 'Start' button ID
-START_BUTTON_ID = 7 
-
-class Robot:
-    """Main class to manage robot state and components."""
-    
-    def __init__(self):
-        """Initialize all robot components."""
-        print("Initializing robot components...")
-        self.motor_ctrl = motor.MotorController()
-        self.joy_ctrl = joystick.JoystickController()
-        self.servo_ctrl = servo.ServoController() 
-        
-        # Add other components here later
-        # self.camera = camera.Camera()
-        # self.speaker = speaker.Speaker()
-        
-        self.manual_mode = False 
-        self.start_button_pressed_last_frame = False
-        self.running = True
-        
-        print(f"Max motor speed set to {robot_modes.MAX_SPEED}%.")
-        print("Press 'Start' button to toggle Manual/Automatic mode.")
-        print("Use Joystick for driving (Manual).")
-        print("Use X/B for Tilt, Y/A for Pan (Manual).")
-        print("Press Ctrl+C to stop.")
-
-    def check_mode_switch(self):
-        """Checks for 'Start' button press to toggle mode."""
-        current_start_button_state = self.joy_ctrl.get_button_state(START_BUTTON_ID)
-        
-        if current_start_button_state and not self.start_button_pressed_last_frame:
-            self.manual_mode = not self.manual_mode
-            print(f"\n*** MODE SWITCHED: {'MANUAL' if self.manual_mode else 'AUTOMATIC'} ***")
-            self.motor_ctrl.stop_all() 
-            
-        self.start_button_pressed_last_frame = current_start_button_state
-
-    def loop(self):
-        """Main robot loop."""
-        while self.running:
-            try:
-                self.check_mode_switch()
-
-                status_message = ""
-                
-                if self.manual_mode:
-                    status_message = robot_modes.handle_manual_mode(self.joy_ctrl, self.motor_ctrl, self.servo_ctrl)
-                else:
-                    # Pass all components needed for auto mode
-                    status_message = robot_modes.handle_automatic_mode(self.motor_ctrl, self.servo_ctrl)
-
-                print(status_message, end='\r')
-                time.sleep(0.05)
-                
-            except KeyboardInterrupt:
-                print("\nProgram stopped by user (Ctrl+C).")
-                self.running = False 
-            except Exception as e:
-                print(f"\nAn error occurred: {e}")
-                self.running = False 
-
-    def cleanup(self):
-        """Clean up all resources."""
-        print("\nCleaning up resources...")
-        if hasattr(self, 'motor_ctrl'):
-            self.motor_ctrl.cleanup()
-        if hasattr(self, 'joy_ctrl'):
-            self.joy_ctrl.quit()
-        if hasattr(self, 'servo_ctrl'):
-            self.servo_ctrl.cleanup() 
-        # Add cleanup for camera/speaker later
-        print("Program terminated.")
+def parse_args():
+    """Parses command line arguments."""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", type=str, default="best.onnx", help="Path to ONNX model")
+    ap.add_argument("--labels", type=str, default="fire", help="Comma-separated labels")
+    ap.add_argument("--img", type=int, default=320, help="Inference image size")
+    ap.add_argument("--skip", type=int, default=1, help="Frame skip for inference")
+    # Add other args from cam_label_tester_best.py as needed
+    return ap.parse_args()
 
 def main():
-    robot = None
+    args = parse_args()
+    
+    # --- Controller Handles ---
+    motor_ctrl = None
+    joy_ctrl = None
+    servo_ctrl = None
+    pump_ctrl = None
+    camera_ctrl = None
+    detector_ctrl = None
+    gui = None
+    robot_thread = None
+    adc_ctrl = None
+    gas_ctrl = None
+    water_ctrl = None
+    fire_ctrl = None
+    buzzer_ctrl = None
+    rgb_ctrl = None
+    
     try:
-        robot = Robot()
-        robot.loop()
+        print("Initializing robot components from main...")
+        
+        # --- Initialize Hardware Controllers (RPi.GPIO) ---
+        # motor.py calls GPIO.setmode(GPIO.BCM)
+        motor_ctrl = motor.MotorController()
+        joy_ctrl = joystick.JoystickController()
+        servo_ctrl = servo.ServoController()
+        pump_ctrl = pump.PumpController() 
+        buzzer_ctrl = buzzer.BuzzerController()
+        rgb_ctrl = rgb_led.RGBLed()
+
+        # --- Initialize Analog Sensors (SPI / MCP3208) ---
+        adc_ctrl = mcp_adc.MCP3208()
+        gas_ctrl = gas_sensor.GasSensor(adc_ctrl)
+        water_ctrl = water_sensor.WaterSensor(adc_ctrl)
+        fire_ctrl = fire_sensor.FireSensor(adc_ctrl)
+        
+        # --- Initialize AI and Camera ---
+        # Camera must start AFTER RPi.GPIO setup if using GStreamer (we use picamera2, so it's fine)
+        camera_ctrl = camera.Camera()
+        detector_ctrl = detector.Detector(
+            model_path=args.model,
+            img_size=args.img,
+            labels=[s.strip() for s in args.labels.split(",")]
+        )
+        
+        # --- Initialize GUI (in Main Thread) ---
+        gui = app_gui.FireTruckGUI(camera_ctrl, detector_ctrl, args)
+        
+        # --- Create Robot Control Thread ---
+        robot_thread = threading.Thread(
+            target=robot_modes.run_robot_loop,
+            args=(
+                gui, motor_ctrl, joy_ctrl, servo_ctrl, 
+                pump_ctrl, camera_ctrl, detector_ctrl,
+                fire_ctrl, gas_ctrl, water_ctrl,
+                buzzer_ctrl, rgb_ctrl
+            ),
+            daemon=True 
+        )
+        gui.robot_thread = robot_thread 
+
+        # --- Start Everything ---
+        # Camera is started by robot_modes when switching to auto mode
+        robot_thread.start() # Start robot logic loop
+        gui.start_gui_loops() # Start GUI's internal loops
+        
+        print("[INFO] All systems started. Running GUI main loop...")
+        gui.run() # This blocks the main thread until the GUI window is closed
+
+    except KeyboardInterrupt:
+        print("\nProgram stopped by user (Ctrl+C).")
+    except Exception as e:
+        print(f"\nAn error occurred: {e}")
     finally:
-        if robot:
-            robot.cleanup()
+        print("\nCleaning up resources from main...")
+        
+        if gui:
+            gui.running = False # Tell threads to stop
+            time.sleep(0.1) # Give threads time to exit loop
+
+        # Hardware cleanup
+        if camera_ctrl:
+            camera_ctrl.stop()
+        if adc_ctrl:
+            adc_ctrl.cleanup()
+        if buzzer_ctrl:
+            buzzer_ctrl.cleanup()
+        if rgb_ctrl:
+            rgb_ctrl.cleanup()
+        if pump_ctrl:
+            pump_ctrl.cleanup()
+        if servo_ctrl:
+            servo_ctrl.cleanup()
+        if motor_ctrl:
+            motor_ctrl.cleanup() # This one calls GPIO.cleanup()
+        if joy_ctrl:
+            joy_ctrl.quit()
+            
+        print("Program terminated.")
 
 if __name__ == "__main__":
     main()

@@ -1,71 +1,87 @@
 # servo.py
-import lgpio
+import RPi.GPIO as GPIO
 import time
 import numpy as np 
 
 class ServoController:
-    # --- [Previous code remains unchanged] ---
-    PAN_SERVO_PIN = 24
-    TILT_SERVO_PIN = 25
-    PULSE_WIDTH_MIN = 500
-    PULSE_WIDTH_MAX = 2500
-    PWM_FREQ = 50
+    # --- [PIN MAP] ---
+    PAN_SERVO_PIN = 12
+    TILT_SERVO_PIN = 19
+    # ---------------------
+    
+    PWM_FREQ = 50 # 50 Hz
+    
     INITIAL_PAN_ANGLE = 90
-    INITIAL_TILT_ANGLE = 0
+    INITIAL_TILT_ANGLE = 0 # Your request: Tilt starts at the bottom
 
     def __init__(self):
-        try:
-            self.h = lgpio.gpiochip_open(0)
-        except Exception as e:
-            print(f"Error opening GPIO chip 0: {e}")
-            print("Trying GPIO chip 4 (often for RPi 5)...")
-            try:
-                self.h = lgpio.gpiochip_open(4)
-            except Exception as e2:
-                print(f"Error opening GPIO chip 4: {e2}")
-                print("Failed to initialize lgpio. Check permissions.")
-                raise ConnectionError("Failed to open lgpio chip.")
+        """Initialize servo controller using RPi.GPIO"""
+        # We assume RPi.GPIO.setmode(GPIO.BCM) is called ONCE in motor.py
         
-        lgpio.gpio_claim_output(self.h, self.PAN_SERVO_PIN)
-        lgpio.gpio_claim_output(self.h, self.TILT_SERVO_PIN)
+        GPIO.setup(self.PAN_SERVO_PIN, GPIO.OUT)
+        GPIO.setup(self.TILT_SERVO_PIN, GPIO.OUT)
+        
+        self.pan_pwm = GPIO.PWM(self.PAN_SERVO_PIN, self.PWM_FREQ)
+        self.tilt_pwm = GPIO.PWM(self.TILT_SERVO_PIN, self.PWM_FREQ)
+        
+        self.pan_pwm.start(0) # Start with 0 duty cycle
+        self.tilt_pwm.start(0)
         
         self.current_pan_angle = self.INITIAL_PAN_ANGLE
         self.current_tilt_angle = self.INITIAL_TILT_ANGLE
         
-        print("ServoController initialized (using lgpio).")
+        print(f"ServoController initialized (using RPi.GPIO pins {self.PAN_SERVO_PIN}, {self.TILT_SERVO_PIN}).")
         
-        self.set_angle(self.PAN_SERVO_PIN, self.INITIAL_PAN_ANGLE)
-        self.set_angle(self.TILT_SERVO_PIN, self.INITIAL_TILT_ANGLE)
-        time.sleep(0.7)
+        # --- [FIX] ---
+        # Send a longer, continuous pulse *only* during initialization
+        # to ensure servos move to the starting position.
+        
+        print("Moving servos to initial position...")
+        
+        # Move Pan servo
+        pan_duty = self._angle_to_duty_cycle(self.INITIAL_PAN_ANGLE)
+        self.pan_pwm.ChangeDutyCycle(pan_duty)
+        
+        # Move Tilt servo
+        tilt_duty = self._angle_to_duty_cycle(self.INITIAL_TILT_ANGLE)
+        self.tilt_pwm.ChangeDutyCycle(tilt_duty)
+        
+        # Wait 0.5 seconds for servos to physically move
+        time.sleep(0.5)
+        
+        # Turn off pulses (back to one-shot mode)
+        self.pan_pwm.ChangeDutyCycle(0)
+        self.tilt_pwm.ChangeDutyCycle(0)
+        # --- [END FIX] ---
+        
         print(f"Servos initialized: Pan to {self.INITIAL_PAN_ANGLE} deg, Tilt to {self.INITIAL_TILT_ANGLE} deg.")
 
-    def _angle_to_pulse_width(self, angle):
+    def _angle_to_duty_cycle(self, angle):
+        """Converts angle (0-180) to duty cycle using YOUR formula."""
         angle = max(0, min(180, angle))
-        pulse_width_us = int(self.PULSE_WIDTH_MIN + (angle / 180.0) * \
-                          (self.PULSE_WIDTH_MAX - self.PULSE_WIDTH_MIN))
-        return pulse_width_us
+        duty_cycle = 2.5 + (angle / 18.0) # YOUR working formula
+        return duty_cycle
 
     def set_angle(self, servo_pin, angle):
-        """Sets the angle of the specified servo instantly."""
-        pulse_width_us = self._angle_to_pulse_width(angle)
-        pulse_width_ns = pulse_width_us * 1000 # Convert to nanoseconds
+        """Sets the angle using the 'One-Shot Pulse' method with YOUR timing."""
+        duty_cycle = self._angle_to_duty_cycle(angle)
         
-        lgpio.tx_servo(self.h, servo_pin, pulse_width_ns, self.PWM_FREQ)
-        
+        pwm_instance = None
         if servo_pin == self.PAN_SERVO_PIN:
+            pwm_instance = self.pan_pwm
             self.current_pan_angle = angle
         elif servo_pin == self.TILT_SERVO_PIN:
+            pwm_instance = self.tilt_pwm
             self.current_tilt_angle = angle
-
-
+        
+        if pwm_instance:
+            pwm_instance.ChangeDutyCycle(duty_cycle)
+            time.sleep(0.005) # YOUR working sleep duration
+            pwm_instance.ChangeDutyCycle(0) # YOUR working disable pulse
 
     def cleanup(self):
-        """Stops servo pulses and disconnects from lgpio."""
-        print("Cleaning up Servos...")
-        lgpio.tx_servo(self.h, self.PAN_SERVO_PIN, 0, self.PWM_FREQ)
-        lgpio.tx_servo(self.h, self.TILT_SERVO_PIN, 0, self.PWM_FREQ)
-        
-        lgpio.gpio_free(self.h, self.PAN_SERVO_PIN)
-        lgpio.gpio_free(self.h, self.TILT_SERVO_PIN)
-        
-        lgpio.gpiochip_close(self.h)
+        """Stops servo pulses."""
+        print("Cleaning up Servos (RPi.GPIO)...")
+        self.pan_pwm.stop()
+        self.tilt_pwm.stop()
+        # GPIO.cleanup() will be called by motor_ctrl in main.pys
